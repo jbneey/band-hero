@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Band Hero</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/scan-chart-web@3.4.5-1/dist/scan-chart-web.umd.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- Меню загрузки -->
+    <div id="menu">
+      <h1>🎸 Band Hero</h1>
+      <p>Загрузите папку с картой Clone Hero<br>(<code>notes.chart</code> + <code>song.mp3</code> или <code>song.ogg</code>)</p>
+      <input type="file" id="folderInput" webkitdirectory directory multiple />
+      <p id="status"></p>
+      <button id="startBtn" disabled>▶ Играть</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
