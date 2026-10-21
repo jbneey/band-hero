@@ -2,26 +2,537 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Band Hero</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/scan-chart-web@3.4.5-1/dist/scan-chart-web.umd.js"></script>
-  <link rel="stylesheet" href="style.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    body {
+      background: #0a0a0f;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #app { position: relative; width: 100vw; height: 100vh; }
+    #gameCanvas { display: block; position: absolute; inset: 0; }
+
+    #menu {
+      position: absolute; inset: 0; z-index: 10;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 14px; padding: 20px;
+      background: rgba(10, 10, 15, 0.96);
+      text-align: center;
+      overflow-y: auto;
+    }
+    #menu.hidden { display: none; }
+    #menu h1 { font-size: 2rem; letter-spacing: 1px; }
+    #menu p { color: #aaa; line-height: 1.4; font-size: 0.9rem; max-width: 400px; }
+    #menu code { color: #ff6b9d; background: rgba(255,107,157,0.1); padding: 1px 5px; border-radius: 4px; }
+
+    .file-label {
+      display: inline-block; padding: 10px 24px;
+      background: rgba(255,255,255,0.08);
+      border: 1px dashed rgba(255,255,255,0.3);
+      border-radius: 10px; cursor: pointer; font-size: 0.9rem;
+    }
+    .file-label:active { background: rgba(255,255,255,0.15); }
+    input[type="file"] { display: none; }
+
+    button.primary {
+      padding: 14px 44px; border: none; border-radius: 999px;
+      background: linear-gradient(135deg, #ff6b9d, #c084fc);
+      color: #fff; font-size: 1.1rem; font-weight: 700;
+      cursor: pointer; transition: transform 0.1s, opacity 0.2s;
+    }
+    button.primary:disabled { opacity: 0.35; cursor: not-allowed; }
+    button.primary:not(:disabled):active { transform: scale(0.96); }
+
+    button.secondary {
+      padding: 10px 24px; border: 1px solid rgba(255,255,255,0.3);
+      background: transparent; color: #ddd; border-radius: 999px;
+      font-size: 0.9rem; cursor: pointer;
+    }
+    button.secondary:active { background: rgba(255,255,255,0.1); }
+
+    #status { min-height: 1.4em; color: #7dd3fc; font-size: 0.85rem; max-width: 420px; word-break: break-word; }
+    #errorBox {
+      background: rgba(220, 38, 38, 0.9); color: #fff;
+      padding: 12px 16px; border-radius: 10px;
+      font-family: 'SF Mono', Menlo, monospace; font-size: 12px;
+      max-width: 90vw; white-space: pre-wrap; word-break: break-all;
+      text-align: left;
+    }
+    #errorBox:empty { display: none; }
+  </style>
 </head>
 <body>
   <div id="app">
     <canvas id="gameCanvas"></canvas>
 
-    <!-- Меню загрузки -->
     <div id="menu">
       <h1>🎸 Band Hero</h1>
-      <p>Загрузите папку с картой Clone Hero<br>(<code>notes.chart</code> + <code>song.mp3</code> или <code>song.ogg</code>)</p>
-      <input type="file" id="folderInput" webkitdirectory directory multiple />
+      <p>Выберите файлы карты Clone Hero:<br>
+         <code>notes.chart</code> и аудио (<code>song.ogg</code> / <code>.mp3</code> / <code>.wav</code>).<br>
+         Можно выбрать сразу оба файла (на iOS — через «Обзор» → «Выбрать несколько»).</p>
+
+      <label class="file-label">
+        📁 Выбрать файлы карты
+        <input type="file" id="filesInput" multiple accept=".chart,.mid,.ogg,.mp3,.wav,.m4a,.opus" />
+      </label>
+
+      <button class="secondary" id="demoBtn">🎵 Попробовать демо (без файлов)</button>
       <p id="status"></p>
-      <button id="startBtn" disabled>▶ Играть</button>
+      <div id="errorBox"></div>
+      <button class="primary" id="startBtn" disabled>▶ Играть</button>
     </div>
   </div>
 
-  <script src="game.js"></script>
+  <script>
+  // ============================================================
+  // Band Hero — full single-file build
+  // ============================================================
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const menuEl = document.getElementById('menu');
+  const filesInput = document.getElementById('filesInput');
+  const startBtn = document.getElementById('startBtn');
+  const statusEl = document.getElementById('status');
+  const errorBox = document.getElementById('errorBox');
+  const demoBtn = document.getElementById('demoBtn');
+
+  // ---------- Config ----------
+  const LANES = 5;
+  const LANE_COLORS = ['#22c55e', '#ef4444', '#eab308', '#3b82f6', '#f97316'];
+  const LANE_KEYS = ['a', 's', 'd', 'k', 'l'];
+  const HIT_WINDOW_MS = 150;
+  const SCROLL_SPEED = 0.55;
+  const NOTE_HEIGHT = 22;
+  let calibrationOffsetMs = 0; // ручная подстройка если ноты не в такт
+
+  // ---------- State ----------
+  let chart = null;
+  let audioBuffer = null;
+  let audioContext = null;
+  let sourceNode = null;
+  let songStartTime = 0;
+  let notes = [];
+  let score = 0;
+  let combo = 0;
+  let maxCombo = 0;
+  let isPlaying = false;
+  let animationId = null;
+  let laneFlash = [0, 0, 0, 0, 0];
+
+  // ---------- Error helpers ----------
+  function showError(msg) {
+    errorBox.textContent = msg;
+    console.error(msg);
+  }
+  function clearError() { errorBox.textContent = ''; }
+  function setStatus(msg) { statusEl.textContent = msg; console.log('[BH]', msg); }
+
+  window.addEventListener('error', (e) => {
+    showError('JS Error: ' + (e.message || e.error) + '\n' + (e.filename || '') + ':' + (e.lineno || ''));
+  });
+
+  // ============================================================
+  // .CHART PARSER (own implementation)
+  // ============================================================
+  function parseChartText(text) {
+    const lines = text.split(/\r?\n/);
+    const sections = {};
+    let current = null;
+
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      const sec = line.match(/^\[(.+)\]$/);
+      if (sec) {
+        current = sec[1];
+        sections[current] = [];
+        continue;
+      }
+      if (current) sections[current].push(line);
+    }
+
+    // Metadata
+    const meta = {};
+    if (sections['Song']) {
+      for (const line of sections['Song']) {
+        const m = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.+)$/);
+        if (m) meta[m[1]] = m[2].replace(/^"|"$/g, '');
+      }
+    }
+    const resolution = parseInt(meta.Resolution || '192', 10);
+    const songOffset = parseInt(meta.Offset || '0', 10);
+
+    // BPM events
+    const bpmEvents = [];
+    if (sections['SyncTrack']) {
+      for (const line of sections['SyncTrack']) {
+        const m = line.match(/^(\d+)\s*=\s*B\s+(\d+)$/);
+        if (m) bpmEvents.push({ tick: +m[1], bpmUs: +m[2] });
+      }
+    }
+    bpmEvents.sort((a, b) => a.tick - b.tick);
+    if (!bpmEvents.length) bpmEvents.push({ tick: 0, bpmUs: 500000 });
+
+    function tickToMs(tick) {
+      let ms = 0, lastTick = 0, lastBpm = bpmEvents[0];
+      for (const ev of bpmEvents) {
+        if (ev.tick >= tick) break;
+        ms += ((ev.tick - lastTick) / resolution) * (lastBpm.bpmUs / 1000);
+        lastTick = ev.tick;
+        lastBpm = ev;
+      }
+      ms += ((tick - lastTick) / resolution) * (lastBpm.bpmUs / 1000);
+      return ms;
+    }
+
+    // Notes — try Expert, fallback to lower difficulty
+    const diffs = ['ExpertSingle', 'HardSingle', 'MediumSingle', 'EasySingle',
+                   'ExpertDoubleBass', 'ExpertDrums'];
+    let noteLines = null, usedDiff = null;
+    for (const d of diffs) {
+      if (sections[d]?.length) { noteLines = sections[d]; usedDiff = d; break; }
+    }
+    if (!noteLines) throw new Error('Не найдено ни одной секции с нотами ([ExpertSingle] и т.п.)');
+
+    const notes = [];
+    for (const line of noteLines) {
+      // tick = N lane length
+      const m = line.match(/^(\d+)\s*=\s*N\s+(\d+)\s+(\d+)$/);
+      if (!m) continue;
+      const tick = +m[1], lane = +m[2];
+      if (lane < 0 || lane > 4) continue; // гитара — 5 ладов
+      notes.push({
+        timeMs: tickToMs(tick) + songOffset,
+        lane,
+      });
+    }
+    notes.sort((a, b) => a.timeMs - b.timeMs);
+
+    return {
+      name: meta.Name || 'Unknown',
+      artist: meta.Artist || 'Unknown',
+      notes,
+      usedDiff,
+      resolution,
+      songOffset,
+    };
+  }
+
+  // ============================================================
+  // File loading
+  // ============================================================
+  filesInput.addEventListener('change', async (e) => {
+    clearError();
+    setStatus('Чтение файлов...');
+    const files = Array.from(e.target.files);
+
+    const chartFile = files.find(f => f.name.toLowerCase().endsWith('.chart'));
+    if (!chartFile) {
+      return showError('Файл .chart не найден. Убедитесь, что выбрали notes.chart (не .mid — .mid пока не поддерживается).');
+    }
+
+    const audioFile = files.find(f => /\.(mp3|ogg|wav|m4a|opus)$/i.test(f.name));
+    if (!audioFile) {
+      return showError('Аудиофайл не найден. Нужен song.ogg / song.mp3 / song.wav рядом с notes.chart.');
+    }
+
+    try {
+      setStatus('Парсинг карты...');
+      const text = await chartFile.text();
+      chart = parseChartText(text);
+      setStatus(`✅ ${chart.name} — ${chart.artist} (${chart.notes.length} нот, ${chart.usedDiff})`);
+
+      setStatus(s => s + '\nДекодирование аудио...');
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const arrayBuffer = await audioFile.arrayBuffer();
+      try {
+        audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      } catch (decErr) {
+        throw new Error(
+          'Браузер не смог декодировать аудио (' + audioFile.name + ').\n' +
+          'Если это .ogg на iPhone — Safari не поддерживает OGG. Сконвертируйте в .mp3.\n' +
+          'Технически: ' + decErr.message
+        );
+      }
+
+      if (!chart.notes.length) throw new Error('Карта не содержит нот на выбранной сложности.');
+
+      setStatus(`🎵 Готово: ${chart.name}. Нажмите «Играть».`);
+      startBtn.disabled = false;
+    } catch (err) {
+      showError(err.message || String(err));
+      startBtn.disabled = true;
+    }
+  });
+
+  // ============================================================
+  // Demo (no files needed)
+  // ============================================================
+  demoBtn.addEventListener('click', async () => {
+    clearError();
+    try {
+      if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioContext.state === 'suspended') await audioContext.resume();
+
+      const bpm = 120, beats = 64;
+      const msPerBeat = 60000 / bpm;
+      const totalMs = beats * msPerBeat;
+
+      const demoNotes = [];
+      for (let i = 0; i < beats; i++) {
+        demoNotes.push({ timeMs: i * msPerBeat, lane: i % LANES });
+      }
+      chart = { name: 'Demo Track', artist: 'Band Hero', notes: demoNotes, usedDiff: 'demo' };
+
+      // Generate click track
+      const sampleRate = audioContext.sampleRate;
+      const durationSec = totalMs / 1000 + 1;
+      const length = Math.ceil(durationSec * sampleRate);
+      const buf = audioContext.createBuffer(1, length, sampleRate);
+      const data = buf.getChannelData(0);
+      for (let b = 0; b < beats; b++) {
+        const startSample = Math.floor(b * (msPerBeat / 1000) * sampleRate);
+        const clickSamples = Math.floor(0.04 * sampleRate);
+        const freq = b % 4 === 0 ? 1200 : 800;
+        for (let i = 0; i < clickSamples && startSample + i < length; i++) {
+          const t = i / sampleRate;
+          const env = Math.exp(-t * 80);
+          data[startSample + i] += Math.sin(2 * Math.PI * freq * t) * env * 0.4;
+        }
+      }
+      audioBuffer = buf;
+
+      setStatus(`🎵 Демо готово (${bpm} BPM). Нажмите «Играть».`);
+      startBtn.disabled = false;
+    } catch (err) {
+      showError('Demo error: ' + err.message);
+    }
+  });
+
+  // ============================================================
+  // Start & game loop
+  // ============================================================
+  startBtn.addEventListener('click', async () => {
+    clearError();
+    if (!chart || !audioBuffer) return;
+    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioContext.state === 'suspended') await audioContext.resume();
+
+    menuEl.classList.add('hidden');
+    prepareNotes();
+    startPlayback();
+  });
+
+  function prepareNotes() {
+    notes = chart.notes.map(n => ({ ...n, hit: false, missed: false }));
+    score = 0; combo = 0; maxCombo = 0;
+    laneFlash = [0, 0, 0, 0, 0];
+  }
+
+  function startPlayback() {
+    if (sourceNode) { try { sourceNode.stop(); } catch (_) {} }
+    sourceNode = audioContext.createBufferSource();
+    sourceNode.buffer = audioBuffer;
+    sourceNode.connect(audioContext.destination);
+    const startAt = audioContext.currentTime + 0.15;
+    sourceNode.start(startAt);
+    songStartTime = startAt;
+    isPlaying = true;
+    animationId = requestAnimationFrame(gameLoop);
+  }
+
+  function gameLoop() {
+    if (!isPlaying) return;
+    resizeCanvas();
+    const songTimeMs = (audioContext.currentTime - songStartTime) * 1000 + calibrationOffsetMs;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawHighway();
+    drawNotes(songTimeMs);
+    drawHUD(songTimeMs);
+    animationId = requestAnimationFrame(gameLoop);
+  }
+
+  // ============================================================
+  // Rendering
+  // ============================================================
+  function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = window.innerWidth, h = window.innerHeight;
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+      canvas.width = w * dpr; canvas.height = h * dpr;
+      canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  }
+
+  function metrics() {
+    const w = window.innerWidth, h = window.innerHeight;
+    const laneW = Math.min(72, (w - 40) / LANES);
+    const highwayW = laneW * LANES;
+    return { w, h, laneW, highwayW, highwayX: (w - highwayW) / 2, hitY: h - 130 };
+  }
+
+  function drawHighway() {
+    const { laneW, highwayW, highwayX, hitY, w, h } = metrics();
+    ctx.fillStyle = 'rgba(20, 20, 30, 0.85)';
+    ctx.fillRect(highwayX, 0, highwayW, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < LANES; i++) {
+      const x = highwayX + laneW * i;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    }
+    // Lane flashes
+    for (let i = 0; i < LANES; i++) {
+      if (laneFlash[i] > 0) {
+        ctx.fillStyle = LANE_COLORS[i] + '55';
+        ctx.fillRect(highwayX + laneW * i, hitY - 20, laneW, 40);
+        laneFlash[i]--;
+      }
+    }
+    // Hit line
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(highwayX, hitY); ctx.lineTo(highwayX + highwayW, hitY); ctx.stroke();
+    // Lane markers
+    for (let i = 0; i < LANES; i++) {
+      ctx.fillStyle = LANE_COLORS[i] + '33';
+      ctx.fillRect(highwayX + laneW * i, hitY - 8, laneW, 16);
+    }
+  }
+
+  function drawNotes(songTimeMs) {
+    const { laneW, highwayX, hitY, h } = metrics();
+    for (const note of notes) {
+      if (note.hit || note.missed) continue;
+      const deltaMs = note.timeMs - songTimeMs;
+      if (deltaMs > (hitY / SCROLL_SPEED) + 100) continue;
+      if (deltaMs < -HIT_WINDOW_MS - 120) { note.missed = true; combo = 0; continue; }
+      const y = hitY - deltaMs * SCROLL_SPEED;
+      if (y < -NOTE_HEIGHT || y > h + NOTE_HEIGHT) continue;
+      const x = highwayX + laneW * note.lane;
+      ctx.fillStyle = LANE_COLORS[note.lane];
+      roundRect(ctx, x + 5, y - NOTE_HEIGHT / 2, laneW - 10, NOTE_HEIGHT, 7);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      roundRect(ctx, x + 9, y - NOTE_HEIGHT / 2 + 3, laneW - 18, 5, 3);
+      ctx.fill();
+    }
+  }
+
+  function drawHUD(songTimeMs) {
+    const { w } = metrics();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Счёт: ${score}`, 16, 34);
+    ctx.textAlign = 'right';
+    ctx.fillText(`Комбо: ${combo}`, w - 16, 34);
+    ctx.textAlign = 'center';
+    ctx.font = '13px -apple-system, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    const cur = Math.max(0, songTimeMs / 1000);
+    const total = audioBuffer ? audioBuffer.duration : 0;
+    ctx.fillText(`${fmt(cur)} / ${fmt(total)}`, w / 2, 34);
+    if (total > 0 && cur >= total && isPlaying) {
+      isPlaying = false;
+      cancelAnimationFrame(animationId);
+      showResults();
+    }
+  }
+
+  function fmt(sec) { const m = Math.floor(sec/60), s = Math.floor(sec%60); return `${m}:${String(s).padStart(2,'0')}`; }
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  // ============================================================
+  // Input
+  // ============================================================
+  function handleLanePress(lane) {
+    if (!isPlaying) return;
+    laneFlash[lane] = 6;
+    const songTimeMs = (audioContext.currentTime - songStartTime) * 1000 + calibrationOffsetMs;
+    let best = null, bestDelta = Infinity;
+    for (const note of notes) {
+      if (note.hit || note.missed || note.lane !== lane) continue;
+      const d = Math.abs(note.timeMs - songTimeMs);
+      if (d < bestDelta) { bestDelta = d; best = note; }
+    }
+    if (best && bestDelta <= HIT_WINDOW_MS) {
+      best.hit = true;
+      combo++;
+      if (combo > maxCombo) maxCombo = combo;
+      score += 50 + Math.min(combo, 30) * 5;
+    } else {
+      combo = 0;
+    }
+  }
+
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const { laneW, highwayX } = metrics();
+    for (const t of e.changedTouches) {
+      const x = t.clientX - highwayX;
+      if (x < 0) continue;
+      const lane = Math.floor(x / laneW);
+      if (lane >= 0 && lane < LANES) handleLanePress(lane);
+    }
+  }, { passive: false });
+
+  window.addEventListener('keydown', (e) => {
+    const idx = LANE_KEYS.indexOf(e.key.toLowerCase());
+    if (idx !== -1) handleLanePress(idx);
+  });
+
+  // ============================================================
+  // Results
+  // ============================================================
+  function showResults() {
+    const hits = notes.filter(n => n.hit).length;
+    const total = notes.length;
+    const acc = total ? ((hits / total) * 100).toFixed(1) : '0.0';
+    menuEl.classList.remove('hidden');
+    menuEl.innerHTML = `
+      <h1>🏁 Готово!</h1>
+      <p style="font-size:1.1rem;color:#fff">Счёт: <b>${score}</b></p>
+      <p>Точность: <b>${acc}%</b> (${hits} / ${total})</p>
+      <p>Макс. комбо: <b>${maxCombo}</b></p>
+      <button class="primary" id="againBtn">🔄 Ещё раз</button>
+      <button class="secondary" id="menuBtn">🏠 В меню</button>
+    `;
+    document.getElementById('againBtn').addEventListener('click', () => {
+      menuEl.classList.add('hidden');
+      prepareNotes();
+      startPlayback();
+    });
+    document.getElementById('menuBtn').addEventListener('click', () => location.reload());
+  }
+
+  // ============================================================
+  // Init
+  // ============================================================
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+  if (window.Telegram?.WebApp) {
+    window.Telegram.WebApp.ready();
+    try { window.Telegram.WebApp.expand(); } catch (_) {}
+  }
+  </script>
 </body>
 </html>
